@@ -1,46 +1,46 @@
+//go:generate go-winres make --product-version=git-tag
 package main
 
 import (
+	"embed"
+	"fmt"
 	"os"
-	"os/exec"
 	"os/signal"
+	"sync"
 
-	"github.com/keepbao/go-synTrans/config"
-	"github.com/keepbao/go-synTrans/server"
+	server "github.com/keepbao/go-synTrans/server"
+
+	"github.com/zserge/lorca"
 )
 
-func main() {
-	chChromeDie := make(chan struct{})
-	chBackendDie := make(chan struct{})
-	go server.Run()
-	go startBrower(chChromeDie, chBackendDie)
-	chSignal := listenToInterrupt()
-	for {
-		select {
-		case <-chSignal:
-			chBackendDie <- struct{}{}
-		case <-chChromeDie:
-			os.Exit(0)
-		}
+//go:embed server/frontend/dist/*
+var FS embed.FS
+
+func recoverFromError() {
+	if r := recover(); r != nil {
+		fmt.Println("Recovering from panic:", r)
 	}
 }
-
-func startBrower(chChromeDie chan struct{}, chBackendDie chan struct{}) {
-	chromePath := "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe"
-	cmd := exec.Command(chromePath, "--app=http://127.0.0.1:"+config.GetPort()+"/static/index.html")
-	cmd.Start()
-	go func() {
-		<-chBackendDie
-		cmd.Process.Kill()
-	}()
-	go func() {
-		cmd.Wait()
-		chChromeDie <- struct{}{}
-	}()
-}
-
-func listenToInterrupt() chan os.Signal {
-	chSignal := make(chan os.Signal, 1)
-	signal.Notify(chSignal, os.Interrupt)
-	return chSignal
+func main() {
+	var endWaiter sync.WaitGroup
+	endWaiter.Add(1)
+	start := make(chan int)
+	end := make(chan interface{})
+	go server.Run(start, end)
+	go func(start chan int, quit chan interface{}) {
+		port := <-start
+		defer recoverFromError()
+		ui, _ := lorca.New(fmt.Sprintf("http://127.0.0.1:%d/static/index.html", port), "", 800, 600, "--disable-sync", " --disable-translate")
+		defer ui.Close()
+		quit <- (<-ui.Done())
+	}(start, end)
+	signalChannel := make(chan os.Signal, 1)
+	signal.Notify(signalChannel, os.Interrupt)
+	select {
+	case <-signalChannel:
+		endWaiter.Done()
+	case <-end:
+		endWaiter.Done()
+	}
+	endWaiter.Wait()
 }
